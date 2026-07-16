@@ -13,14 +13,14 @@ import { formatDistanceToNow } from "date-fns";
 export function Forum({ profile }: { profile: Profile }) {
   const qc = useQueryClient();
   const [creating, setCreating] = useState(false);
-  const [expandedPost, setExpandedPost] = useState<any | null>(null);
+  const [expandedPostId, setExpandedPostId] = useState<string | null>(null);
 
   const { data: posts } = useQuery({
     queryKey: ["posts"],
     queryFn: async () => {
       const { data, error } = await supabase
         .from("posts")
-        .select("*, author:profiles!posts_author_id_fkey(name, role, domain), my_vote:post_votes(vote_value)")
+        .select("*, author:profiles!posts_author_id_fkey(name, role, domain), my_vote:post_votes(vote_value, user_id)")
         .order("created_at", { ascending: false });
       
       if (error) throw error;
@@ -63,10 +63,37 @@ export function Forum({ profile }: { profile: Profile }) {
         if (error) throw error;
       }
     },
-    onSuccess: () => {
+    onMutate: async ({ postId, value }) => {
+      await qc.cancelQueries({ queryKey: ["posts"] });
+      const previousPosts = qc.getQueryData(["posts"]);
+
+      qc.setQueryData(["posts"], (old: any[] | undefined) => {
+        if (!old) return [];
+        return old.map((post) => {
+          if (post.id === postId) {
+            const currentVote = post.userVote || 0;
+            const diff = value - currentVote;
+            return {
+              ...post,
+              score: post.score + diff,
+              userVote: value,
+            };
+          }
+          return post;
+        });
+      });
+
+      return { previousPosts };
+    },
+    onError: (err, newVote, context: any) => {
+      if (context?.previousPosts) {
+        qc.setQueryData(["posts"], context.previousPosts);
+      }
+      toast.error(err.message);
+    },
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: ["posts"] });
     },
-    onError: (e: any) => toast.error(e.message),
   });
 
   const handleCreatePost = (e: React.FormEvent<HTMLFormElement>) => {
@@ -97,42 +124,56 @@ export function Forum({ profile }: { profile: Profile }) {
           </div>
         )}
         {posts?.map((post) => (
-          <div key={post.id} className="flex gap-4 rounded-xl border border-border bg-card p-4 shadow-card">
-            {/* Voting Sidebar */}
-            <div className="flex flex-col items-center gap-1">
-              <Button
-                variant="ghost"
-                size="icon"
-                className={`h-8 w-8 ${post.userVote === 1 ? 'text-orange-500' : 'text-muted-foreground'}`}
-                onClick={() => votePost.mutate({ postId: post.id, value: post.userVote === 1 ? 0 : 1 })}
-              >
-                <ArrowBigUp className="h-6 w-6" />
-              </Button>
-              <span className="text-sm font-bold">{post.score}</span>
-              <Button
-                variant="ghost"
-                size="icon"
-                className={`h-8 w-8 ${post.userVote === -1 ? 'text-indigo-500' : 'text-muted-foreground'}`}
-                onClick={() => votePost.mutate({ postId: post.id, value: post.userVote === -1 ? 0 : -1 })}
-              >
-                <ArrowBigDown className="h-6 w-6" />
-              </Button>
-            </div>
-            
-            {/* Post Content */}
-            <div className="flex-1 space-y-2">
-              <div className="text-xs text-muted-foreground">
-                Posted by {post.author?.name} · {post.author?.role} {post.author?.domain ? `(${post.author.domain})` : ""} · {formatDistanceToNow(new Date(post.created_at))} ago
-              </div>
-              <h3 className="text-lg font-semibold">{post.title}</h3>
-              <p className="whitespace-pre-wrap text-sm text-muted-foreground">{post.content}</p>
-              
-              <div className="pt-2">
-                <Button variant="ghost" size="sm" className="h-8 gap-2 text-xs" onClick={() => setExpandedPost(post)}>
-                  <MessageSquare className="h-4 w-4" /> Discuss
+          <div key={post.id} className="rounded-xl border border-border bg-card p-4 shadow-card space-y-4">
+            <div className="flex gap-4">
+              {/* Voting Sidebar */}
+              <div className="flex flex-col items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className={`h-8 w-8 transition-colors ${post.userVote === 1 ? 'text-orange-500 hover:text-orange-600' : 'text-muted-foreground hover:text-orange-500'}`}
+                  onClick={() => votePost.mutate({ postId: post.id, value: post.userVote === 1 ? 0 : 1 })}
+                >
+                  <ArrowBigUp className={`h-6 w-6 transition-all ${post.userVote === 1 ? 'fill-orange-500 text-orange-500' : ''}`} />
+                </Button>
+                <span className="text-sm font-bold">{post.score}</span>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className={`h-8 w-8 transition-colors ${post.userVote === -1 ? 'text-indigo-500 hover:text-indigo-600' : 'text-muted-foreground hover:text-indigo-500'}`}
+                  onClick={() => votePost.mutate({ postId: post.id, value: post.userVote === -1 ? 0 : -1 })}
+                >
+                  <ArrowBigDown className={`h-6 w-6 transition-all ${post.userVote === -1 ? 'fill-indigo-500 text-indigo-500' : ''}`} />
                 </Button>
               </div>
+              
+              {/* Post Content */}
+              <div className="flex-1 space-y-2">
+                <div className="text-xs text-muted-foreground">
+                  Posted by {post.author?.name} · {post.author?.role} {post.author?.domain ? `(${post.author.domain})` : ""} · {formatDistanceToNow(new Date(post.created_at))} ago
+                </div>
+                <h3 className="text-lg font-semibold">{post.title}</h3>
+                <p className="whitespace-pre-wrap text-sm text-muted-foreground">{post.content}</p>
+                
+                <div className="pt-2">
+                  <Button 
+                    variant="ghost" 
+                    size="sm" 
+                    className="h-8 gap-2 text-xs" 
+                    onClick={() => setExpandedPostId(expandedPostId === post.id ? null : post.id)}
+                  >
+                    <MessageSquare className="h-4 w-4" /> Discuss
+                  </Button>
+                </div>
+              </div>
             </div>
+
+            {/* Collapsible inline comment section */}
+            {expandedPostId === post.id && (
+              <div className="border-t pt-4 pl-4 md:pl-12">
+                <PostCommentsSection postId={post.id} profile={profile} />
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -156,43 +197,89 @@ export function Forum({ profile }: { profile: Profile }) {
           </form>
         </DialogContent>
       </Dialog>
-
-      {expandedPost && (
-        <PostCommentsDialog post={expandedPost} profile={profile} onClose={() => setExpandedPost(null)} />
-      )}
     </div>
   );
 }
 
-function PostCommentsDialog({ post, profile, onClose }: { post: any; profile: Profile; onClose: () => void }) {
+function PostCommentsSection({ postId, profile }: { postId: string; profile: Profile }) {
   const qc = useQueryClient();
 
   const { data: comments } = useQuery({
-    queryKey: ["comments", post.id],
+    queryKey: ["comments", postId],
     queryFn: async () => {
       const { data, error } = await supabase
         .from("comments")
-        .select("*, author:profiles!comments_author_id_fkey(name, role, domain)")
-        .eq("post_id", post.id)
+        .select("*, author:profiles!comments_author_id_fkey(name, role, domain), my_vote:comment_votes(vote_value, user_id)")
+        .eq("post_id", postId)
         .order("created_at", { ascending: true });
       if (error) throw error;
-      return data;
+      return data?.map(c => ({
+        ...c,
+        userVote: c.my_vote?.find((v: any) => v.user_id === profile.id)?.vote_value || 0
+      })) || [];
     },
   });
 
   const createComment = useMutation({
     mutationFn: async (content: string) => {
       const { error } = await supabase.from("comments").insert({
-        post_id: post.id,
+        post_id: postId,
         author_id: profile.id,
         content,
       });
       if (error) throw error;
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["comments", post.id] });
+      qc.invalidateQueries({ queryKey: ["comments", postId] });
     },
     onError: (e: any) => toast.error(e.message),
+  });
+
+  const voteComment = useMutation({
+    mutationFn: async ({ commentId, value }: { commentId: string; value: number }) => {
+      if (value === 0) {
+        const { error } = await supabase.from("comment_votes").delete().eq("comment_id", commentId).eq("user_id", profile.id);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from("comment_votes").upsert({
+          comment_id: commentId,
+          user_id: profile.id,
+          vote_value: value,
+        }, { onConflict: "comment_id,user_id" });
+        if (error) throw error;
+      }
+    },
+    onMutate: async ({ commentId, value }) => {
+      await qc.cancelQueries({ queryKey: ["comments", postId] });
+      const previousComments = qc.getQueryData(["comments", postId]);
+
+      qc.setQueryData(["comments", postId], (old: any[] | undefined) => {
+        if (!old) return [];
+        return old.map((c) => {
+          if (c.id === commentId) {
+            const currentVote = c.userVote || 0;
+            const diff = value - currentVote;
+            return {
+              ...c,
+              score: (c.score || 0) + diff,
+              userVote: value,
+            };
+          }
+          return c;
+        });
+      });
+
+      return { previousComments };
+    },
+    onError: (err, newVote, context: any) => {
+      if (context?.previousComments) {
+        qc.setQueryData(["comments", postId], context.previousComments);
+      }
+      toast.error(err.message);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["comments", postId] });
+    },
   });
 
   const handleAddComment = (e: React.FormEvent<HTMLFormElement>) => {
@@ -205,42 +292,51 @@ function PostCommentsDialog({ post, profile, onClose }: { post: any; profile: Pr
   };
 
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
-        <DialogHeader>
-          <div className="text-xs text-muted-foreground">
-            Posted by {post.author?.name}
-          </div>
-          <DialogTitle className="text-xl">{post.title}</DialogTitle>
-        </DialogHeader>
-        <div className="whitespace-pre-wrap text-sm text-foreground mb-4">
-          {post.content}
-        </div>
-        
-        <div className="space-y-4 border-t pt-4">
-          <h4 className="font-semibold text-sm">Comments</h4>
-          {comments?.length === 0 && <div className="text-sm text-muted-foreground">No comments yet.</div>}
-          <div className="space-y-4">
-            {comments?.map(c => (
-              <div key={c.id} className="rounded-lg bg-muted/50 p-3 text-sm">
-                <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
-                  <span>
-                    <strong className="text-foreground font-medium">{c.author?.name}</strong> 
-                    {c.author?.role === 'alumni' && <span className="ml-1 text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded">Alumnus</span>}
-                  </span>
-                  <span>{formatDistanceToNow(new Date(c.created_at))} ago</span>
-                </div>
-                <div className="whitespace-pre-wrap">{c.content}</div>
-              </div>
-            ))}
-          </div>
+    <div className="space-y-4">
+      <h4 className="font-semibold text-sm">Comments</h4>
+      {comments?.length === 0 && <div className="text-sm text-muted-foreground">No comments yet.</div>}
+      <div className="space-y-3">
+        {comments?.map(c => (
+          <div key={c.id} className="flex gap-3 rounded-lg bg-muted/40 p-3 text-sm">
+            {/* Comment Vote buttons */}
+            <div className="flex flex-col items-center gap-0.5">
+              <Button
+                variant="ghost"
+                size="icon"
+                className={`h-6 w-6 transition-colors ${c.userVote === 1 ? 'text-orange-500 hover:text-orange-600' : 'text-muted-foreground hover:text-orange-500'}`}
+                onClick={() => voteComment.mutate({ commentId: c.id, value: c.userVote === 1 ? 0 : 1 })}
+              >
+                <ArrowBigUp className={`h-4 w-4 transition-all ${c.userVote === 1 ? 'fill-orange-500 text-orange-500' : ''}`} />
+              </Button>
+              <span className="text-xs font-bold">{c.score || 0}</span>
+              <Button
+                variant="ghost"
+                size="icon"
+                className={`h-6 w-6 transition-colors ${c.userVote === -1 ? 'text-indigo-500 hover:text-indigo-600' : 'text-muted-foreground hover:text-indigo-500'}`}
+                onClick={() => voteComment.mutate({ commentId: c.id, value: c.userVote === -1 ? 0 : -1 })}
+              >
+                <ArrowBigDown className={`h-4 w-4 transition-all ${c.userVote === -1 ? 'fill-indigo-500 text-indigo-500' : ''}`} />
+              </Button>
+            </div>
 
-          <form onSubmit={handleAddComment} className="mt-4 flex gap-2">
-            <Textarea name="content" placeholder="Write a comment..." className="min-h-[80px]" required />
-            <Button type="submit" disabled={createComment.isPending} className="self-end">Submit</Button>
-          </form>
-        </div>
-      </DialogContent>
-    </Dialog>
+            <div className="flex-1">
+              <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
+                <span>
+                  <strong className="text-foreground font-medium">{c.author?.name}</strong> 
+                  {c.author?.role === 'alumni' && <span className="ml-1 text-[10px] bg-primary/10 text-primary px-1.5 py-0.5 rounded">Alumnus</span>}
+                </span>
+                <span>{formatDistanceToNow(new Date(c.created_at))} ago</span>
+              </div>
+              <div className="whitespace-pre-wrap">{c.content}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <form onSubmit={handleAddComment} className="mt-4 flex gap-2">
+        <Textarea name="content" placeholder="Write a comment..." className="min-h-[80px]" required />
+        <Button type="submit" disabled={createComment.isPending} className="self-end">Submit</Button>
+      </form>
+    </div>
   );
 }
